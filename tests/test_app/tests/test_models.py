@@ -422,6 +422,9 @@ class RevertFieldsSubsetTest(TestBase):
         with reversion.create_revision():
             obj.name = "v2"
             obj.save()
+        self.assertEqual(Version.objects.get_for_object(obj)[0].field_dict, {
+            "name": "v2",
+        })
         obj.name = "outside"
         obj.save()
         Version.objects.get_for_object(obj)[0].revert()

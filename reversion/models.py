@@ -9,7 +9,7 @@ from django.conf import settings
 from django.contrib.contenttypes.fields import GenericForeignKey
 from django.contrib.contenttypes.models import ContentType
 from django.core import serializers
-from django.core.exceptions import ObjectDoesNotExist
+from django.core.exceptions import FieldDoesNotExist, ObjectDoesNotExist
 from django.core.serializers.base import DeserializationError
 from django.core.serializers.json import DjangoJSONEncoder
 from django.db import IntegrityError, connections, models, router, transaction
@@ -355,6 +355,14 @@ class Version(models.Model):
             return field.target_field.to_python(value)
         return field.to_python(value)
 
+    def _get_version_field(self, field_attname):
+        version_options = _get_options(self._model)
+        for field_name in version_options.fields:
+            field = self._model._meta.get_field(field_name)
+            if field.attname == field_attname:
+                return field
+        raise FieldDoesNotExist(field_attname)
+
     def _coerce_field_dict(self, field_dict):
         coerced = {}
         version_options = _get_options(self._model)
@@ -366,6 +374,16 @@ class Version(models.Model):
         return coerced
 
     def _build_local_field_dict(self):
+        field_dict = {}
+        for version in self._reconstruction_chain:
+            if version._delta_payload is None:
+                field_dict = version._local_field_dict_from_object_version()
+            else:
+                field_dict.update(version._coerce_field_dict(version._delta_payload["fields"]))
+        return field_dict
+
+    @cached_property
+    def _reconstruction_chain(self):
         versions = (
             Version.objects.using(self._state.db)
             .get_for_object_reference(self._model, self.object_id, model_db=self.db)
@@ -381,31 +399,19 @@ class Version(models.Model):
             chain.append(version)
             if version._delta_payload is None:
                 break
-        field_dict = {}
-        for version in reversed(chain):
-            if version._delta_payload is None:
-                field_dict = version._local_field_dict_from_object_version()
-            else:
-                field_dict.update(version._coerce_field_dict(version._delta_payload["fields"]))
-        return field_dict
+        return tuple(reversed(chain))
 
     def _build_serialized_data(self):
-        version_options = _get_options(self._model)
-        model = self._model
-        field_dict = self._local_field_dict
-        pk_field = model._meta.pk
-        serialized_fields = {}
-        for field_name in version_options.fields:
-            field = model._meta.get_field(field_name)
-            if field.primary_key:
-                continue
-            if field.attname in field_dict:
-                serialized_fields[field.name] = field_dict[field.attname]
-        return json.dumps([{
-            "model": model._meta.label_lower,
-            "pk": self._delta_payload.get("pk", field_dict.get(pk_field.attname)),
-            "fields": serialized_fields,
-        }], cls=DjangoJSONEncoder, sort_keys=True)
+        data = json.loads(self._reconstruction_chain[0].serialized_data)
+        if not data:
+            return self.serialized_data
+        serialized_version = data[0]
+        for version in self._reconstruction_chain[1:]:
+            serialized_version["pk"] = version._delta_payload.get("pk", serialized_version.get("pk"))
+            for field_name, value in version._delta_payload["fields"].items():
+                field = self._get_version_field(field_name)
+                serialized_version["fields"][field.name] = value
+        return json.dumps(data, cls=DjangoJSONEncoder, sort_keys=True)
 
     @cached_property
     def field_dict(self):

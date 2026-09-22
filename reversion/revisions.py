@@ -208,12 +208,14 @@ def _add_to_revision(obj, using, model_db, explicit):
     )
     format = version_options.format
     if previous_version and version_options.format == "json":
-        serialized_data = Version.serialize_delta({
+        delta_fields = {
             field_name: value
             for field_name, value in current_field_dict.items()
             if previous_version._local_field_dict.get(field_name) != value
-        }, obj.pk)
-        format = "json"
+        }
+        if delta_fields:
+            serialized_data = Version.serialize_delta(delta_fields, obj.pk)
+            format = "json"
     version = Version(
         content_type=content_type,
         object_id=object_id,
