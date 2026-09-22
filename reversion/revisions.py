@@ -418,10 +418,11 @@ _queryset_update = QuerySet.update
 def _update_with_revision(self, **kwargs):
     if not _can_track_bulk_operation(self.model):
         return _queryset_update(self, **kwargs)
+    locked_queryset = self.select_for_update()
     with transaction.atomic(using=self.db, savepoint=False):
-        pks = list(self.select_for_update().order_by().values_list("pk", flat=True))
+        pks = list(locked_queryset.order_by().values_list("pk", flat=True))
         before_snapshot = _get_objects_field_snapshot(self.model, self.db, pks, kwargs.keys())
-        rows_updated = _queryset_update(self, **kwargs)
+        rows_updated = _queryset_update(locked_queryset, **kwargs)
         if rows_updated:
             after_snapshot = _get_objects_field_snapshot(self.model, self.db, pks, kwargs.keys())
             changed_pks = {
@@ -441,18 +442,18 @@ def _bulk_update_with_revision(self, objs, fields, batch_size=None):
     if not _can_track_bulk_operation(self.model):
         return _queryset_bulk_update(self, objs, fields, batch_size=batch_size)
     pks = list(dict.fromkeys(obj.pk for obj in objs if obj.pk is not None))
+    scoped_queryset = self.filter(pk__in=pks).select_for_update()
     with transaction.atomic(using=self.db, savepoint=False):
-        if pks:
-            list(self.model._base_manager.using(self.db).select_for_update().filter(pk__in=pks))
-        before_snapshot = _get_objects_field_snapshot(self.model, self.db, pks, fields)
+        matched_pks = list(scoped_queryset.order_by().values_list("pk", flat=True))
+        before_snapshot = _get_objects_field_snapshot(self.model, self.db, matched_pks, fields)
         rows_updated = _queryset_bulk_update(self, objs, fields, batch_size=batch_size)
         if rows_updated:
-            after_snapshot = _get_objects_field_snapshot(self.model, self.db, pks, fields)
+            after_snapshot = _get_objects_field_snapshot(self.model, self.db, matched_pks, fields)
             changed_pks = {
                 pk for pk, values in after_snapshot.items()
                 if before_snapshot.get(pk) != values
             }
-            for obj in _iter_objects_for_bulk_operation(self.model, self.db, pks):
+            for obj in _iter_objects_for_bulk_operation(self.model, self.db, matched_pks):
                 if obj.pk in changed_pks:
                     add_to_revision(obj, model_db=self.db)
         return rows_updated
