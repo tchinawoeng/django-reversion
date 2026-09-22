@@ -350,7 +350,13 @@ class Version(models.Model):
             return None
         if isinstance(field, models.ManyToManyField):
             target_field = field.target_field
-            return [target_field.to_python(item) for item in value]
+            coerced = []
+            for item in value:
+                if isinstance(item, (list, tuple)):
+                    coerced.append(type(item)(target_field.to_python(part) for part in item))
+                else:
+                    coerced.append(target_field.to_python(item))
+            return coerced
         if isinstance(field, (models.ForeignKey, models.OneToOneField)):
             return field.target_field.to_python(value)
         return field.to_python(value)
@@ -408,7 +414,9 @@ class Version(models.Model):
             raise RevertError(gettext("Could not load %(object_repr)s version - incompatible version data.") % {
                 "object_repr": self.object_repr,
             })
-        target_pk = force_str(self._delta_payload.get("pk"))
+        base_version = self._reconstruction_chain[0]
+        base_pk = base_version._local_field_dict_from_object_version().get(base_version._model._meta.pk.attname)
+        target_pk = force_str(base_pk if base_pk is not None else self._delta_payload.get("pk"))
         serialized_version = next((
             item for item in data
             if item.get("model") == self._model._meta.label_lower
