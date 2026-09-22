@@ -408,9 +408,11 @@ class Version(models.Model):
             raise RevertError(gettext("Could not load %(object_repr)s version - incompatible version data.") % {
                 "object_repr": self.object_repr,
             })
+        target_pk = force_str(self._delta_payload.get("pk"))
         serialized_version = next((
             item for item in data
             if item.get("model") == self._model._meta.label_lower
+            and force_str(item.get("pk")) == target_pk
         ), None)
         if serialized_version is None:
             raise RevertError(gettext("Could not load %(object_repr)s version - incompatible version data.") % {

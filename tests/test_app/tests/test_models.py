@@ -68,6 +68,25 @@ class GetForObjectTest(TestModelMixin, TestBase):
             "pk": obj.pk,
         })
 
+    def testGetForObjectStoresDeltaWhenFieldReturnsToOlderValue(self):
+        with reversion.create_revision():
+            obj = TestModel.objects.create()
+        with reversion.create_revision():
+            obj.name = "v2"
+            obj.save()
+        with reversion.create_revision():
+            obj.name = "v1"
+            obj.save()
+        latest_version = Version.objects.get_for_object(obj)[0]
+        self.assertEqual(latest_version.field_dict["name"], "v1")
+        self.assertEqual(json.loads(latest_version.serialized_data), {
+            "__reversion_delta__": True,
+            "fields": {
+                "name": "v1",
+            },
+            "pk": obj.pk,
+        })
+
     def testGetForObjectFiltering(self):
         with reversion.create_revision():
             obj_1 = TestModel.objects.create()
