@@ -6,6 +6,7 @@ from django.db import models
 from django.db.transaction import get_connection
 from django.utils import timezone
 import reversion
+from reversion.models import Version
 from test_app.models import TestModel, TestModelRelated, TestModelThrough, TestModelParent, TestMeta
 from test_app.tests.base import TestBase, TestBaseTransaction, TestModelMixin, UserMixin
 
@@ -223,6 +224,98 @@ class CreateRevisionIgnoreDuplicatesTest(TestBase):
         with reversion.create_revision():
             obj.save()
         self.assertSingleRevision((obj,))
+
+
+class CreateRevisionBulkOperationTest(TestModelMixin, TestBase):
+
+    def testCreateRevisionUpdate(self):
+        with reversion.create_revision():
+            obj = TestModel.objects.create()
+        with reversion.create_revision():
+            TestModel.objects.filter(pk=obj.pk).update(name="v2")
+        versions = Version.objects.get_for_object_reference(TestModel, obj.pk)
+        self.assertEqual(versions.count(), 2)
+        self.assertEqual(versions[0].field_dict["name"], "v2")
+
+    def testCreateRevisionUpdateNoMatches(self):
+        with reversion.create_revision():
+            rows_updated = TestModel.objects.filter(pk=-1).update(name="v2")
+        self.assertEqual(rows_updated, 0)
+        self.assertNoRevision()
+
+    def testCreateRevisionUpdateMultiple(self):
+        with reversion.create_revision():
+            obj_1 = TestModel.objects.create()
+            obj_2 = TestModel.objects.create()
+        with reversion.create_revision():
+            TestModel.objects.filter(pk__in=[obj_1.pk, obj_2.pk]).update(name="v2")
+        self.assertEqual(Version.objects.get_for_object_reference(TestModel, obj_1.pk)[0].field_dict["name"], "v2")
+        self.assertEqual(Version.objects.get_for_object_reference(TestModel, obj_2.pk)[0].field_dict["name"], "v2")
+
+    def testCreateRevisionBulkUpdate(self):
+        with reversion.create_revision():
+            obj = TestModel.objects.create()
+        obj.name = "v2"
+        with reversion.create_revision():
+            TestModel.objects.bulk_update([obj], ["name"])
+        versions = Version.objects.get_for_object_reference(TestModel, obj.pk)
+        self.assertEqual(versions.count(), 2)
+        self.assertEqual(versions[0].field_dict["name"], "v2")
+
+    def testCreateRevisionBulkUpdateNoObjects(self):
+        with reversion.create_revision():
+            rows_updated = TestModel.objects.bulk_update([], ["name"])
+        self.assertEqual(rows_updated, 0)
+        self.assertNoRevision()
+
+    def testCreateRevisionBulkUpdateMultiple(self):
+        with reversion.create_revision():
+            obj_1 = TestModel.objects.create()
+            obj_2 = TestModel.objects.create()
+        obj_1.name = "v2"
+        obj_2.name = "v3"
+        with reversion.create_revision():
+            TestModel.objects.bulk_update([obj_1, obj_2], ["name"])
+        self.assertEqual(Version.objects.get_for_object_reference(TestModel, obj_1.pk)[0].field_dict["name"], "v2")
+        self.assertEqual(Version.objects.get_for_object_reference(TestModel, obj_2.pk)[0].field_dict["name"], "v3")
+
+    def testCreateRevisionBulkUpdateDuplicateObject(self):
+        with reversion.create_revision():
+            obj = TestModel.objects.create()
+        obj_first = TestModel.objects.get(pk=obj.pk)
+        obj_second = TestModel.objects.get(pk=obj.pk)
+        obj_first.name = "v2"
+        obj_second.name = "v3"
+        with reversion.create_revision():
+            TestModel.objects.bulk_update([obj_first, obj_second], ["name"])
+        obj.refresh_from_db()
+        self.assertEqual(obj.name, "v2")
+        self.assertEqual(Version.objects.get_for_object_reference(TestModel, obj.pk)[0].field_dict["name"], "v2")
+
+    def testCreateRevisionBulkUpdateFilteredQuerySet(self):
+        with reversion.create_revision():
+            obj_1 = TestModel.objects.create()
+            obj_2 = TestModel.objects.create()
+        obj_1.name = "v2"
+        obj_2.name = "v3"
+        with reversion.create_revision():
+            rows_updated = TestModel.objects.filter(pk=obj_1.pk).bulk_update([obj_1, obj_2], ["name"])
+        self.assertEqual(rows_updated, 1)
+        obj_1.refresh_from_db()
+        obj_2.refresh_from_db()
+        self.assertEqual(obj_1.name, "v2")
+        self.assertEqual(obj_2.name, "v1")
+        self.assertEqual(Version.objects.get_for_object_reference(TestModel, obj_1.pk).count(), 2)
+        self.assertEqual(Version.objects.get_for_object_reference(TestModel, obj_2.pk).count(), 1)
+
+    def testCreateRevisionBulkDelete(self):
+        with reversion.create_revision():
+            obj = TestModel.objects.create()
+        with reversion.create_revision():
+            TestModel.objects.filter(pk=obj.pk).delete()
+        deleted = Version.objects.get_deleted(TestModel)
+        self.assertEqual(deleted.count(), 1)
+        self.assertEqual(deleted.get().object_id, str(obj.pk))
 
 
 class CreateRevisionInheritanceTest(TestModelMixin, TestBase):

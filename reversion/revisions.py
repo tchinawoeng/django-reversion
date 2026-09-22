@@ -2,12 +2,13 @@ from contextvars import ContextVar
 from collections import namedtuple, defaultdict
 from contextlib import contextmanager
 from functools import wraps
+import inspect
 from django.apps import apps
 from django.core import serializers
 from django.core.exceptions import ObjectDoesNotExist
 from django.db import models, transaction, router, connections
 from django.db.models.query import QuerySet
-from django.db.models.signals import post_save, m2m_changed
+from django.db.models.signals import post_save, pre_delete, m2m_changed
 from django.utils.encoding import force_str
 from django.utils import timezone
 from reversion.errors import RevisionManagementError, RegistrationError
@@ -178,7 +179,7 @@ def _extract_field_dict(obj):
     return field_dict
 
 
-def _add_to_revision(obj, using, model_db, explicit):
+def _add_to_revision(obj, using, model_db, explicit, keep=False):
     from reversion.models import Version
     # Exit early if the object is not fully-formed.
     if obj.pk is None:
@@ -224,6 +225,7 @@ def _add_to_revision(obj, using, model_db, explicit):
         serialized_data=serialized_data,
         object_repr=force_str(obj),
     )
+    version._reversion_keep = keep
     # Store the version.
     db_versions = _copy_db_versions(db_versions)
     db_versions[using][version_key] = version
@@ -233,10 +235,10 @@ def _add_to_revision(obj, using, model_db, explicit):
         _add_to_revision(follow_obj, using, model_db, False)
 
 
-def add_to_revision(obj, model_db=None):
+def add_to_revision(obj, model_db=None, keep=False):
     model_db = model_db or router.db_for_write(obj.__class__, instance=obj)
     for db in _current_frame().db_versions.keys():
-        _add_to_revision(obj, db, model_db, True)
+        _add_to_revision(obj, db, model_db, True, keep=keep)
 
 
 def _save_revision(versions, user=None, comment="", meta=(), date_created=None, using=None):
@@ -261,7 +263,10 @@ def _save_revision(versions, user=None, comment="", meta=(), date_created=None, 
     }
     versions = [
         version for version in versions
-        if version.object_id in model_db_existing_pks[version._model][version.db]
+        if (
+            getattr(version, "_reversion_keep", False) or
+            version.object_id in model_db_existing_pks[version._model][version.db]
+        )
     ]
     # Bail early if there are no objects to save.
     if not versions:
@@ -372,10 +377,102 @@ def _post_save_receiver(sender, instance, using, **kwargs):
         add_to_revision(instance, model_db=using)
 
 
+def _pre_delete_receiver(sender, instance, using, **kwargs):
+    if is_registered(sender) and is_active() and not is_manage_manually():
+        add_to_revision(instance, model_db=using, keep=True)
+
+
 def _m2m_changed_receiver(instance, using, action, model, reverse, **kwargs):
     if action.startswith("post_") and not reverse:
         if is_registered(instance) and is_active() and not is_manage_manually():
             add_to_revision(instance, model_db=using)
+
+
+def _can_track_bulk_operation(model):
+    return is_active() and not is_manage_manually() and is_registered(model)
+
+
+def _iter_objects_for_bulk_operation(model, using, pks, chunk_size=1000):
+    for offset in range(0, len(pks), chunk_size):
+        yield from model._base_manager.using(using).filter(
+            pk__in=pks[offset:offset + chunk_size],
+        )
+
+
+def _get_field_attnames(model, field_names):
+    return tuple(model._meta.get_field(field_name).attname for field_name in field_names)
+
+
+def _get_objects_field_snapshot(model, using, pks, field_names):
+    attnames = _get_field_attnames(model, field_names)
+    if not pks or not attnames:
+        return {}
+    return {
+        row["pk"]: tuple(row[attname] for attname in attnames)
+        for row in model._base_manager.using(using).filter(pk__in=pks).values("pk", *attnames)
+    }
+
+
+_queryset_update = QuerySet.update
+if str(inspect.signature(_queryset_update)) != "(self, **kwargs)":
+    raise RuntimeError("Unsupported Django QuerySet.update signature")
+
+
+def _update_with_revision(self, **kwargs):
+    if not _can_track_bulk_operation(self.model):
+        return _queryset_update(self, **kwargs)
+    with transaction.atomic(using=self.db, savepoint=False):
+        locked_queryset = self.select_for_update()
+        pks = list(locked_queryset.order_by().values_list("pk", flat=True))
+        before_snapshot = _get_objects_field_snapshot(self.model, self.db, pks, kwargs.keys())
+        rows_updated = _queryset_update(locked_queryset, **kwargs)
+        if rows_updated:
+            after_snapshot = _get_objects_field_snapshot(self.model, self.db, pks, kwargs.keys())
+            changed_pks = {
+                pk for pk, values in after_snapshot.items()
+                if before_snapshot.get(pk) != values
+            }
+            for obj in _iter_objects_for_bulk_operation(self.model, self.db, pks):
+                if obj.pk in changed_pks:
+                    add_to_revision(obj, model_db=self.db)
+        return rows_updated
+
+
+_queryset_bulk_update = QuerySet.bulk_update
+if str(inspect.signature(_queryset_bulk_update)) != "(self, objs, fields, batch_size=None)":
+    raise RuntimeError("Unsupported Django QuerySet.bulk_update signature")
+
+
+def _bulk_update_with_revision(self, objs, fields, batch_size=None):
+    if not _can_track_bulk_operation(self.model):
+        return _queryset_bulk_update(self, objs, fields, batch_size=batch_size)
+    pks = list(dict.fromkeys(obj.pk for obj in objs if obj.pk is not None))
+    with transaction.atomic(using=self.db, savepoint=False):
+        scoped_queryset = self.filter(pk__in=pks).select_for_update()
+        matched_pks = list(scoped_queryset.order_by().values_list("pk", flat=True))
+        matched_pks_set = set(matched_pks)
+        filtered_objs = []
+        seen_pks = set()
+        for obj in objs:
+            if obj.pk in matched_pks_set and obj.pk not in seen_pks:
+                filtered_objs.append(obj)
+                seen_pks.add(obj.pk)
+        before_snapshot = _get_objects_field_snapshot(self.model, self.db, matched_pks, fields)
+        rows_updated = _queryset_bulk_update(scoped_queryset, filtered_objs, fields, batch_size=batch_size)
+        if rows_updated:
+            after_snapshot = _get_objects_field_snapshot(self.model, self.db, matched_pks, fields)
+            changed_pks = {
+                pk for pk, values in after_snapshot.items()
+                if before_snapshot.get(pk) != values
+            }
+            for obj in _iter_objects_for_bulk_operation(self.model, self.db, matched_pks):
+                if obj.pk in changed_pks:
+                    add_to_revision(obj, model_db=self.db)
+        return rows_updated
+
+
+QuerySet.update = _update_with_revision
+QuerySet.bulk_update = _bulk_update_with_revision
 
 
 def _get_registration_key(model):
@@ -395,6 +492,7 @@ def get_registered_models():
 
 def _get_senders_and_signals(model):
     yield model, post_save, _post_save_receiver
+    yield model, pre_delete, _pre_delete_receiver
     opts = model._meta.concrete_model._meta
     for field in opts.local_many_to_many:
         m2m_model = field.remote_field.through
