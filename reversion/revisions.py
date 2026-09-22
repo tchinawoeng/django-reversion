@@ -448,7 +448,7 @@ def _bulk_update_with_revision(self, objs, fields, batch_size=None):
         matched_pks_set = set(matched_pks)
         filtered_objs = [obj for obj in objs if obj.pk in matched_pks_set]
         before_snapshot = _get_objects_field_snapshot(self.model, self.db, matched_pks, fields)
-        rows_updated = _queryset_bulk_update(self, filtered_objs, fields, batch_size=batch_size)
+        rows_updated = _queryset_bulk_update(scoped_queryset, filtered_objs, fields, batch_size=batch_size)
         if rows_updated:
             after_snapshot = _get_objects_field_snapshot(self.model, self.db, matched_pks, fields)
             changed_pks = {
