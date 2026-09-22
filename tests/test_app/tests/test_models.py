@@ -354,6 +354,25 @@ class M2MTest(TestModelMixin, TestBase):
         self.assertEqual(version.field_dict["name"], "v1")
         self.assertEqual(version.field_dict["related"], [v1.pk])
 
+    def testM2MDeltaStorageReplacement(self):
+        v1 = TestModelRelated.objects.create(name="v1")
+        v2 = TestModelRelated.objects.create(name="v2")
+        with reversion.create_revision():
+            obj = TestModel.objects.create()
+            obj.related.add(v1)
+        with reversion.create_revision():
+            obj.related.set([v2])
+            obj.save()
+        version = Version.objects.get_for_object(obj).first()
+        self.assertEqual(json.loads(version.serialized_data), {
+            "__reversion_delta__": True,
+            "fields": {
+                "related": [v2.pk],
+            },
+            "pk": obj.pk,
+        })
+        self.assertEqual(version.field_dict["related"], [v2.pk])
+
 
 class RevertTest(TestModelMixin, TestBase):
 

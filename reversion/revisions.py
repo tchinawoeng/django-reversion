@@ -207,7 +207,7 @@ def _add_to_revision(obj, using, model_db, explicit):
         use_natural_foreign_keys=version_options.use_natural_foreign_keys,
     )
     format = version_options.format
-    if previous_version:
+    if previous_version and version_options.format == "json":
         serialized_data = Version.serialize_delta({
             field_name: value
             for field_name, value in current_field_dict.items()

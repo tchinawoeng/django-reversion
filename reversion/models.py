@@ -366,19 +366,27 @@ class Version(models.Model):
         return coerced
 
     def _build_local_field_dict(self):
-        field_dict = {}
         versions = (
             Version.objects.using(self._state.db)
             .get_for_object_reference(self._model, self.object_id, model_db=self.db)
-            .order_by("pk")
+            .order_by("-pk")
         )
+        chain = []
+        in_chain = False
         for version in versions:
+            if not in_chain:
+                if version.pk != self.pk:
+                    continue
+                in_chain = True
+            chain.append(version)
+            if version._delta_payload is None:
+                break
+        field_dict = {}
+        for version in reversed(chain):
             if version._delta_payload is None:
                 field_dict = version._local_field_dict_from_object_version()
             else:
                 field_dict.update(version._coerce_field_dict(version._delta_payload["fields"]))
-            if version.pk == self.pk:
-                break
         return field_dict
 
     def _build_serialized_data(self):
