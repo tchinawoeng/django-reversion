@@ -237,6 +237,12 @@ class CreateRevisionBulkOperationTest(TestModelMixin, TestBase):
         self.assertEqual(versions.count(), 2)
         self.assertEqual(versions[0].field_dict["name"], "v2")
 
+    def testCreateRevisionUpdateNoMatches(self):
+        with reversion.create_revision():
+            rows_updated = TestModel.objects.filter(pk=-1).update(name="v2")
+        self.assertEqual(rows_updated, 0)
+        self.assertNoRevision()
+
     def testCreateRevisionUpdateMultiple(self):
         with reversion.create_revision():
             obj_1 = TestModel.objects.create()
@@ -255,6 +261,12 @@ class CreateRevisionBulkOperationTest(TestModelMixin, TestBase):
         versions = Version.objects.get_for_object_reference(TestModel, obj.pk)
         self.assertEqual(versions.count(), 2)
         self.assertEqual(versions[0].field_dict["name"], "v2")
+
+    def testCreateRevisionBulkUpdateNoObjects(self):
+        with reversion.create_revision():
+            rows_updated = TestModel.objects.bulk_update([], ["name"])
+        self.assertEqual(rows_updated, 0)
+        self.assertNoRevision()
 
     def testCreateRevisionBulkUpdateMultiple(self):
         with reversion.create_revision():
