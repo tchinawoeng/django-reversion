@@ -285,11 +285,17 @@ class Version(models.Model):
 
     @cached_property
     def _delta_payload(self):
+        if self.format != "json":
+            return None
         try:
             data = json.loads(self.serialized_data)
         except (TypeError, ValueError):
             return None
-        if isinstance(data, dict) and data.get(self._delta_flag) is True:
+        if (
+            isinstance(data, dict) and
+            data.get(self._delta_flag) is True and
+            isinstance(data.get("fields"), dict)
+        ):
             return data
         return None
 
@@ -364,7 +370,6 @@ class Version(models.Model):
         versions = (
             Version.objects.using(self._state.db)
             .get_for_object_reference(self._model, self.object_id, model_db=self.db)
-            .filter(pk__lte=self.pk)
             .order_by("pk")
         )
         for version in versions:
@@ -372,6 +377,8 @@ class Version(models.Model):
                 field_dict = version._local_field_dict_from_object_version()
             else:
                 field_dict.update(version._coerce_field_dict(version._delta_payload["fields"]))
+            if version.pk == self.pk:
+                break
         return field_dict
 
     def _build_serialized_data(self):
