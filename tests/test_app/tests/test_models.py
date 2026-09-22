@@ -323,6 +323,21 @@ class FieldDictInheritanceTest(TestModelParentMixin, TestBase):
             "testmodel_ptr_id": obj.pk,
         })
 
+    def testFieldDictInheritanceDeltaVersion(self):
+        with reversion.create_revision():
+            obj = TestModelParent.objects.create()
+        with reversion.create_revision():
+            obj.name = "v2"
+            obj.parent_name = "parent v2"
+            obj.save()
+        self.assertEqual(Version.objects.get_for_object(obj)[0].field_dict, {
+            "id": obj.pk,
+            "name": "v2",
+            "parent_name": "parent v2",
+            "related": [],
+            "testmodel_ptr_id": obj.pk,
+        })
+
 
 class M2MTest(TestModelMixin, TestBase):
 

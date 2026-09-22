@@ -404,11 +404,18 @@ class Version(models.Model):
     def _build_serialized_data(self):
         base_serialized_data = self._reconstruction_chain[0].serialized_data
         data = json.loads(base_serialized_data)
-        if not isinstance(data, list) or not data or not isinstance(data[0], dict):
+        if not isinstance(data, list) or not data or any(not isinstance(item, dict) for item in data):
             raise RevertError(gettext("Could not load %(object_repr)s version - incompatible version data.") % {
                 "object_repr": self.object_repr,
             })
-        serialized_version = data[0]
+        serialized_version = next((
+            item for item in data
+            if item.get("model") == self._model._meta.label_lower
+        ), None)
+        if serialized_version is None:
+            raise RevertError(gettext("Could not load %(object_repr)s version - incompatible version data.") % {
+                "object_repr": self.object_repr,
+            })
         for version in self._reconstruction_chain[1:]:
             serialized_version["pk"] = version._delta_payload.get("pk", serialized_version.get("pk"))
             for field_name, value in version._delta_payload["fields"].items():
