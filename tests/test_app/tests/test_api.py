@@ -237,6 +237,15 @@ class CreateRevisionBulkOperationTest(TestModelMixin, TestBase):
         self.assertEqual(versions.count(), 2)
         self.assertEqual(versions[0].field_dict["name"], "v2")
 
+    def testCreateRevisionUpdateMultiple(self):
+        with reversion.create_revision():
+            obj_1 = TestModel.objects.create()
+            obj_2 = TestModel.objects.create()
+        with reversion.create_revision():
+            TestModel.objects.filter(pk__in=[obj_1.pk, obj_2.pk]).update(name="v2")
+        self.assertEqual(Version.objects.get_for_object_reference(TestModel, obj_1.pk)[0].field_dict["name"], "v2")
+        self.assertEqual(Version.objects.get_for_object_reference(TestModel, obj_2.pk)[0].field_dict["name"], "v2")
+
     def testCreateRevisionBulkUpdate(self):
         with reversion.create_revision():
             obj = TestModel.objects.create()
@@ -246,6 +255,17 @@ class CreateRevisionBulkOperationTest(TestModelMixin, TestBase):
         versions = Version.objects.get_for_object_reference(TestModel, obj.pk)
         self.assertEqual(versions.count(), 2)
         self.assertEqual(versions[0].field_dict["name"], "v2")
+
+    def testCreateRevisionBulkUpdateMultiple(self):
+        with reversion.create_revision():
+            obj_1 = TestModel.objects.create()
+            obj_2 = TestModel.objects.create()
+        obj_1.name = "v2"
+        obj_2.name = "v3"
+        with reversion.create_revision():
+            TestModel.objects.bulk_update([obj_1, obj_2], ["name"])
+        self.assertEqual(Version.objects.get_for_object_reference(TestModel, obj_1.pk)[0].field_dict["name"], "v2")
+        self.assertEqual(Version.objects.get_for_object_reference(TestModel, obj_2.pk)[0].field_dict["name"], "v3")
 
     def testCreateRevisionBulkDelete(self):
         with reversion.create_revision():

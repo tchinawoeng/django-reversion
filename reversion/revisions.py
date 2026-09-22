@@ -404,23 +404,30 @@ _queryset_update = QuerySet.update
 def _update_with_revision(self, **kwargs):
     if not _can_track_bulk_operation(self.model):
         return _queryset_update(self, **kwargs)
-    pks = list(self.order_by().values_list("pk", flat=True))
-    rows_updated = _queryset_update(self, **kwargs)
-    if rows_updated:
-        for obj in _iter_objects_for_bulk_operation(self.model, self.db, pks):
-            add_to_revision(obj, model_db=self.db)
-    return rows_updated
+    with transaction.atomic(using=self.db, savepoint=False):
+        pks = list(self.select_for_update().order_by().values_list("pk", flat=True))
+        rows_updated = _queryset_update(self, **kwargs)
+        if rows_updated:
+            for obj in _iter_objects_for_bulk_operation(self.model, self.db, pks):
+                add_to_revision(obj, model_db=self.db)
+        return rows_updated
 
 
 _queryset_bulk_update = QuerySet.bulk_update
 
 
 def _bulk_update_with_revision(self, objs, fields, batch_size=None):
-    rows_updated = _queryset_bulk_update(self, objs, fields, batch_size=batch_size)
-    if rows_updated and _can_track_bulk_operation(self.model):
-        for obj in objs:
-            add_to_revision(obj, model_db=self.db)
-    return rows_updated
+    if not _can_track_bulk_operation(self.model):
+        return _queryset_bulk_update(self, objs, fields, batch_size=batch_size)
+    pks = list(dict.fromkeys(obj.pk for obj in objs if obj.pk is not None))
+    with transaction.atomic(using=self.db, savepoint=False):
+        if pks:
+            list(self.model._base_manager.using(self.db).select_for_update().filter(pk__in=pks))
+        rows_updated = _queryset_bulk_update(self, objs, fields, batch_size=batch_size)
+        if rows_updated:
+            for obj in _iter_objects_for_bulk_operation(self.model, self.db, pks):
+                add_to_revision(obj, model_db=self.db)
+        return rows_updated
 
 
 QuerySet.update = _update_with_revision
