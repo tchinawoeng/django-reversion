@@ -418,8 +418,8 @@ _queryset_update = QuerySet.update
 def _update_with_revision(self, **kwargs):
     if not _can_track_bulk_operation(self.model):
         return _queryset_update(self, **kwargs)
-    locked_queryset = self.select_for_update()
     with transaction.atomic(using=self.db, savepoint=False):
+        locked_queryset = self.select_for_update()
         pks = list(locked_queryset.order_by().values_list("pk", flat=True))
         before_snapshot = _get_objects_field_snapshot(self.model, self.db, pks, kwargs.keys())
         rows_updated = _queryset_update(locked_queryset, **kwargs)
@@ -442,8 +442,8 @@ def _bulk_update_with_revision(self, objs, fields, batch_size=None):
     if not _can_track_bulk_operation(self.model):
         return _queryset_bulk_update(self, objs, fields, batch_size=batch_size)
     pks = list(dict.fromkeys(obj.pk for obj in objs if obj.pk is not None))
-    scoped_queryset = self.filter(pk__in=pks).select_for_update()
     with transaction.atomic(using=self.db, savepoint=False):
+        scoped_queryset = self.filter(pk__in=pks).select_for_update()
         matched_pks = list(scoped_queryset.order_by().values_list("pk", flat=True))
         matched_pks_set = set(matched_pks)
         filtered_objs = [obj for obj in objs if obj.pk in matched_pks_set]
