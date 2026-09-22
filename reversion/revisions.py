@@ -7,7 +7,7 @@ from django.core import serializers
 from django.core.exceptions import ObjectDoesNotExist
 from django.db import models, transaction, router, connections
 from django.db.models.query import QuerySet
-from django.db.models.signals import post_save, m2m_changed
+from django.db.models.signals import post_save, pre_delete, m2m_changed
 from django.utils.encoding import force_str
 from django.utils import timezone
 from reversion.errors import RevisionManagementError, RegistrationError
@@ -178,7 +178,7 @@ def _extract_field_dict(obj):
     return field_dict
 
 
-def _add_to_revision(obj, using, model_db, explicit):
+def _add_to_revision(obj, using, model_db, explicit, keep=False):
     from reversion.models import Version
     # Exit early if the object is not fully-formed.
     if obj.pk is None:
@@ -224,6 +224,7 @@ def _add_to_revision(obj, using, model_db, explicit):
         serialized_data=serialized_data,
         object_repr=force_str(obj),
     )
+    version._reversion_keep = keep
     # Store the version.
     db_versions = _copy_db_versions(db_versions)
     db_versions[using][version_key] = version
@@ -233,10 +234,10 @@ def _add_to_revision(obj, using, model_db, explicit):
         _add_to_revision(follow_obj, using, model_db, False)
 
 
-def add_to_revision(obj, model_db=None):
+def add_to_revision(obj, model_db=None, keep=False):
     model_db = model_db or router.db_for_write(obj.__class__, instance=obj)
     for db in _current_frame().db_versions.keys():
-        _add_to_revision(obj, db, model_db, True)
+        _add_to_revision(obj, db, model_db, True, keep=keep)
 
 
 def _save_revision(versions, user=None, comment="", meta=(), date_created=None, using=None):
@@ -261,7 +262,10 @@ def _save_revision(versions, user=None, comment="", meta=(), date_created=None, 
     }
     versions = [
         version for version in versions
-        if version.object_id in model_db_existing_pks[version._model][version.db]
+        if (
+            getattr(version, "_reversion_keep", False) or
+            version.object_id in model_db_existing_pks[version._model][version.db]
+        )
     ]
     # Bail early if there are no objects to save.
     if not versions:
@@ -372,10 +376,55 @@ def _post_save_receiver(sender, instance, using, **kwargs):
         add_to_revision(instance, model_db=using)
 
 
+def _pre_delete_receiver(sender, instance, using, **kwargs):
+    if is_registered(sender) and is_active() and not is_manage_manually():
+        add_to_revision(instance, model_db=using, keep=True)
+
+
 def _m2m_changed_receiver(instance, using, action, model, reverse, **kwargs):
     if action.startswith("post_") and not reverse:
         if is_registered(instance) and is_active() and not is_manage_manually():
             add_to_revision(instance, model_db=using)
+
+
+def _can_track_bulk_operation(model):
+    return is_active() and not is_manage_manually() and is_registered(model)
+
+
+def _iter_objects_for_bulk_operation(model, using, pks, chunk_size=1000):
+    for offset in range(0, len(pks), chunk_size):
+        yield from model._base_manager.using(using).filter(
+            pk__in=pks[offset:offset + chunk_size],
+        )
+
+
+_queryset_update = QuerySet.update
+
+
+def _update_with_revision(self, **kwargs):
+    if not _can_track_bulk_operation(self.model):
+        return _queryset_update(self, **kwargs)
+    pks = list(self.order_by().values_list("pk", flat=True))
+    rows_updated = _queryset_update(self, **kwargs)
+    if rows_updated:
+        for obj in _iter_objects_for_bulk_operation(self.model, self.db, pks):
+            add_to_revision(obj, model_db=self.db)
+    return rows_updated
+
+
+_queryset_bulk_update = QuerySet.bulk_update
+
+
+def _bulk_update_with_revision(self, objs, fields, batch_size=None):
+    rows_updated = _queryset_bulk_update(self, objs, fields, batch_size=batch_size)
+    if rows_updated and _can_track_bulk_operation(self.model):
+        for obj in objs:
+            add_to_revision(obj, model_db=self.db)
+    return rows_updated
+
+
+QuerySet.update = _update_with_revision
+QuerySet.bulk_update = _bulk_update_with_revision
 
 
 def _get_registration_key(model):
@@ -395,6 +444,7 @@ def get_registered_models():
 
 def _get_senders_and_signals(model):
     yield model, post_save, _post_save_receiver
+    yield model, pre_delete, _pre_delete_receiver
     opts = model._meta.concrete_model._meta
     for field in opts.local_many_to_many:
         m2m_model = field.remote_field.through
