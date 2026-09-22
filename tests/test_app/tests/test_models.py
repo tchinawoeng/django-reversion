@@ -405,6 +405,17 @@ class RevertTest(TestModelMixin, TestBase):
         with self.assertRaises(reversion.RevertError):
             Version.objects.get_for_object(obj).get().revert()
 
+    def testRevertDeltaVersionWithMalformedJsonPayload(self):
+        with reversion.create_revision():
+            obj = TestModel.objects.create()
+        with reversion.create_revision():
+            obj.name = "v2"
+            obj.save()
+        version = Version.objects.get_for_object(obj)[0]
+        Version.objects.filter(pk=version.pk).update(serialized_data="[]")
+        with self.assertRaises(reversion.RevertError):
+            Version.objects.get(pk=version.pk).revert()
+
     def testRevertBadFormat(self):
         with reversion.create_revision():
             obj = TestModel.objects.create()

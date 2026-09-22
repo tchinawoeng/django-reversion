@@ -193,9 +193,14 @@ def _add_to_revision(obj, using, model_db, explicit):
     if version_key in versions and not explicit:
         return
     current_field_dict = _extract_field_dict(obj)
-    previous_version = Version.objects.using(using).get_for_object_reference(
+    version_history = Version.objects.using(using).get_for_object_reference(
         obj.__class__, object_id, model_db=model_db
-    ).first()
+    )
+    previous_version = version_history.first()
+    has_snapshot_base = previous_version and any(
+        version._delta_payload is None
+        for version in version_history.iterator()
+    )
     if version_options.ignore_duplicates and explicit:
         if previous_version and previous_version._local_field_dict == current_field_dict:
             return
@@ -207,7 +212,7 @@ def _add_to_revision(obj, using, model_db, explicit):
         use_natural_foreign_keys=version_options.use_natural_foreign_keys,
     )
     format = version_options.format
-    if previous_version and version_options.format == "json":
+    if previous_version and has_snapshot_base and version_options.format == "json":
         delta_fields = {
             field_name: value
             for field_name, value in current_field_dict.items()

@@ -307,7 +307,7 @@ class Version(models.Model):
         try:
             return list(serializers.deserialize(self.format, data, ignorenonexistent=True,
                         use_natural_foreign_keys=version_options.use_natural_foreign_keys))[0]
-        except DeserializationError:
+        except (DeserializationError, IndexError, KeyError, TypeError):
             raise RevertError(gettext("Could not load %(object_repr)s version - incompatible version data.") % {
                 "object_repr": self.object_repr,
             })
@@ -402,9 +402,12 @@ class Version(models.Model):
         return tuple(reversed(chain))
 
     def _build_serialized_data(self):
-        data = json.loads(self._reconstruction_chain[0].serialized_data)
-        if not data:
-            return self.serialized_data
+        base_serialized_data = self._reconstruction_chain[0].serialized_data
+        data = json.loads(base_serialized_data)
+        if not isinstance(data, list) or not data or not isinstance(data[0], dict):
+            raise RevertError(gettext("Could not load %(object_repr)s version - incompatible version data.") % {
+                "object_repr": self.object_repr,
+            })
         serialized_version = data[0]
         for version in self._reconstruction_chain[1:]:
             serialized_version["pk"] = version._delta_payload.get("pk", serialized_version.get("pk"))
