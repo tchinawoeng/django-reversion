@@ -477,6 +477,24 @@ class RevertFieldsSubsetTest(TestBase):
         self.assertEqual(obj.name, "v2")
 
 
+class RevertInheritanceDeltaVersionTest(TestModelParentMixin, TestBase):
+
+    def testRevertInheritedDeltaVersion(self):
+        with reversion.create_revision():
+            obj = TestModelParent.objects.create()
+        with reversion.create_revision():
+            obj.name = "v2"
+            obj.parent_name = "parent v2"
+            obj.save()
+        obj.name = "outside"
+        obj.parent_name = "outside parent"
+        obj.save()
+        Version.objects.get_for_object(obj)[0].revision.revert()
+        obj.refresh_from_db()
+        self.assertEqual(obj.name, "v2")
+        self.assertEqual(obj.parent_name, "parent v2")
+
+
 class RevisionRevertTest(TestModelMixin, TestBase):
 
     def testRevert(self):
