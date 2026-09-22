@@ -1,5 +1,6 @@
 from collections import defaultdict
 from itertools import chain, groupby
+import json
 import logging
 
 import django
@@ -10,6 +11,7 @@ from django.contrib.contenttypes.models import ContentType
 from django.core import serializers
 from django.core.exceptions import ObjectDoesNotExist
 from django.core.serializers.base import DeserializationError
+from django.core.serializers.json import DjangoJSONEncoder
 from django.db import IntegrityError, connections, models, router, transaction
 from django.db.models.deletion import Collector
 from django.db.models.functions import Cast
@@ -220,6 +222,8 @@ class Version(models.Model):
 
     """A saved version of a database model."""
 
+    _delta_flag = "__reversion_delta__"
+
     objects = VersionQuerySet.as_manager()
 
     revision = models.ForeignKey(
@@ -271,10 +275,28 @@ class Version(models.Model):
         help_text="A string representation of the object.",
     )
 
+    @classmethod
+    def serialize_delta(cls, field_dict, pk):
+        return json.dumps({
+            cls._delta_flag: True,
+            "fields": field_dict,
+            "pk": pk,
+        }, cls=DjangoJSONEncoder, sort_keys=True)
+
+    @cached_property
+    def _delta_payload(self):
+        try:
+            data = json.loads(self.serialized_data)
+        except (TypeError, ValueError):
+            return None
+        if isinstance(data, dict) and data.get(self._delta_flag) is True:
+            return data
+        return None
+
     @cached_property
     def _object_version(self):
         version_options = _get_options(self._model)
-        data = self.serialized_data
+        data = self.serialized_data if self._delta_payload is None else self._build_serialized_data()
         data = force_str(data.encode("utf8"))
         try:
             return list(serializers.deserialize(self.format, data, ignorenonexistent=True,
@@ -291,6 +313,11 @@ class Version(models.Model):
 
     @cached_property
     def _local_field_dict(self):
+        if self._delta_payload is not None:
+            return self._build_local_field_dict()
+        return self._local_field_dict_from_object_version()
+
+    def _local_field_dict_from_object_version(self):
         """
         A dictionary mapping field names to field values in this version
         of the model.
@@ -312,6 +339,59 @@ class Version(models.Model):
                 field_dict[field.attname] = getattr(obj, field.attname)
         return field_dict
 
+    def _coerce_field_value(self, field, value):
+        if value is None:
+            return None
+        if isinstance(field, models.ManyToManyField):
+            target_field = field.target_field
+            return [target_field.to_python(item) for item in value]
+        if isinstance(field, (models.ForeignKey, models.OneToOneField)):
+            return field.target_field.to_python(value)
+        return field.to_python(value)
+
+    def _coerce_field_dict(self, field_dict):
+        coerced = {}
+        version_options = _get_options(self._model)
+        model = self._model
+        for field_name in version_options.fields:
+            field = model._meta.get_field(field_name)
+            if field.attname in field_dict:
+                coerced[field.attname] = self._coerce_field_value(field, field_dict[field.attname])
+        return coerced
+
+    def _build_local_field_dict(self):
+        field_dict = {}
+        versions = (
+            Version.objects.using(self._state.db)
+            .get_for_object_reference(self._model, self.object_id, model_db=self.db)
+            .filter(pk__lte=self.pk)
+            .order_by("pk")
+        )
+        for version in versions:
+            if version._delta_payload is None:
+                field_dict = version._local_field_dict_from_object_version()
+            else:
+                field_dict.update(version._coerce_field_dict(version._delta_payload["fields"]))
+        return field_dict
+
+    def _build_serialized_data(self):
+        version_options = _get_options(self._model)
+        model = self._model
+        field_dict = self._local_field_dict
+        pk_field = model._meta.pk
+        serialized_fields = {}
+        for field_name in version_options.fields:
+            field = model._meta.get_field(field_name)
+            if field.primary_key:
+                continue
+            if field.attname in field_dict:
+                serialized_fields[field.name] = field_dict[field.attname]
+        return json.dumps([{
+            "model": model._meta.label_lower,
+            "pk": self._delta_payload.get("pk", field_dict.get(pk_field.attname)),
+            "fields": serialized_fields,
+        }], cls=DjangoJSONEncoder, sort_keys=True)
+
     @cached_property
     def field_dict(self):
         """
@@ -320,7 +400,7 @@ class Version(models.Model):
 
         This method will follow parent links, if present.
         """
-        field_dict = self._local_field_dict
+        field_dict = self._local_field_dict.copy()
         # Add parent data.
         for parent_model, field in self._model._meta.concrete_model._meta.parents.items():
             content_type = _get_content_type(parent_model, self._state.db)

@@ -162,6 +162,22 @@ def _follow_relations_recursive(obj):
     return relations
 
 
+def _extract_field_dict(obj):
+    version_options = _get_options(obj.__class__)
+    field_dict = {}
+    for field_name in version_options.fields:
+        field = obj._meta.get_field(field_name)
+        if isinstance(field, models.ManyToManyField):
+            if not field.remote_field.through._meta.auto_created:
+                continue
+            field_dict[field.attname] = list(
+                getattr(obj, field.name).values_list(field.target_field.attname, flat=True)
+            )
+        else:
+            field_dict[field.attname] = getattr(obj, field.attname)
+    return field_dict
+
+
 def _add_to_revision(obj, using, model_db, explicit):
     from reversion.models import Version
     # Exit early if the object is not fully-formed.
@@ -176,27 +192,36 @@ def _add_to_revision(obj, using, model_db, explicit):
     versions = db_versions[using]
     if version_key in versions and not explicit:
         return
+    current_field_dict = _extract_field_dict(obj)
+    previous_version = Version.objects.using(using).get_for_object_reference(
+        obj.__class__, object_id, model_db=model_db
+    ).first()
+    if version_options.ignore_duplicates and explicit:
+        if previous_version and previous_version._local_field_dict == current_field_dict:
+            return
     # Get the version data.
+    serialized_data = serializers.serialize(
+        version_options.format,
+        (obj,),
+        fields=version_options.fields,
+        use_natural_foreign_keys=version_options.use_natural_foreign_keys,
+    )
+    format = version_options.format
+    if previous_version:
+        serialized_data = Version.serialize_delta({
+            field_name: value
+            for field_name, value in current_field_dict.items()
+            if previous_version._local_field_dict.get(field_name) != value
+        }, obj.pk)
+        format = "json"
     version = Version(
         content_type=content_type,
         object_id=object_id,
         db=model_db,
-        format=version_options.format,
-        serialized_data=serializers.serialize(
-            version_options.format,
-            (obj,),
-            fields=version_options.fields,
-            use_natural_foreign_keys=version_options.use_natural_foreign_keys,
-        ),
+        format=format,
+        serialized_data=serialized_data,
         object_repr=force_str(obj),
     )
-    # If the version is a duplicate, stop now.
-    if version_options.ignore_duplicates and explicit:
-        previous_version = Version.objects.using(using).get_for_object_reference(
-            obj.__class__, object_id, model_db=model_db
-        ).first()
-        if previous_version and previous_version._local_field_dict == version._local_field_dict:
-            return
     # Store the version.
     db_versions = _copy_db_versions(db_versions)
     db_versions[using][version_key] = version

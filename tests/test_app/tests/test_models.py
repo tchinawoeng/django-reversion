@@ -53,6 +53,21 @@ class GetForObjectTest(TestModelMixin, TestBase):
         self.assertEqual(Version.objects.get_for_object(obj)[0].field_dict["name"], "v2")
         self.assertEqual(Version.objects.get_for_object(obj)[1].field_dict["name"], "v1")
 
+    def testGetForObjectStoresDeltaAfterInitialVersion(self):
+        with reversion.create_revision():
+            obj = TestModel.objects.create()
+        with reversion.create_revision():
+            obj.name = "v2"
+            obj.save()
+        latest_version = Version.objects.get_for_object(obj)[0]
+        self.assertEqual(json.loads(latest_version.serialized_data), {
+            "__reversion_delta__": True,
+            "fields": {
+                "name": "v2",
+            },
+            "pk": obj.pk,
+        })
+
     def testGetForObjectFiltering(self):
         with reversion.create_revision():
             obj_1 = TestModel.objects.create()
@@ -321,6 +336,24 @@ class M2MTest(TestModelMixin, TestBase):
         version = Version.objects.get_for_object(obj).first()
         self.assertEqual(set(version.field_dict["related"]), {v1.pk, v2.pk})
 
+    def testM2MDeltaStorage(self):
+        v1 = TestModelRelated.objects.create(name="v1")
+        with reversion.create_revision():
+            obj = TestModel.objects.create()
+        with reversion.create_revision():
+            obj.related.add(v1)
+            obj.save()
+        version = Version.objects.get_for_object(obj).first()
+        self.assertEqual(json.loads(version.serialized_data), {
+            "__reversion_delta__": True,
+            "fields": {
+                "related": [v1.pk],
+            },
+            "pk": obj.pk,
+        })
+        self.assertEqual(version.field_dict["name"], "v1")
+        self.assertEqual(version.field_dict["related"], [v1.pk])
+
 
 class RevertTest(TestModelMixin, TestBase):
 
@@ -333,6 +366,18 @@ class RevertTest(TestModelMixin, TestBase):
         Version.objects.get_for_object(obj)[1].revert()
         obj.refresh_from_db()
         self.assertEqual(obj.name, "v1")
+
+    def testRevertDeltaVersion(self):
+        with reversion.create_revision():
+            obj = TestModel.objects.create()
+        with reversion.create_revision():
+            obj.name = "v2"
+            obj.save()
+        obj.name = "outside"
+        obj.save()
+        Version.objects.get_for_object(obj)[0].revert()
+        obj.refresh_from_db()
+        self.assertEqual(obj.name, "v2")
 
     def testRevertBadSerializedData(self):
         with reversion.create_revision():
@@ -347,6 +392,22 @@ class RevertTest(TestModelMixin, TestBase):
         Version.objects.get_for_object(obj).update(format="boom")
         with self.assertRaises(reversion.RevertError):
             Version.objects.get_for_object(obj).get().revert()
+
+
+class RevertFieldsSubsetTest(TestBase):
+
+    def testRevertDeltaVersionWithSubsetFields(self):
+        reversion.register(TestModel, fields=("name",))
+        with reversion.create_revision():
+            obj = TestModel.objects.create()
+        with reversion.create_revision():
+            obj.name = "v2"
+            obj.save()
+        obj.name = "outside"
+        obj.save()
+        Version.objects.get_for_object(obj)[0].revert()
+        obj.refresh_from_db()
+        self.assertEqual(obj.name, "v2")
 
 
 class RevisionRevertTest(TestModelMixin, TestBase):
