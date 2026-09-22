@@ -2,6 +2,7 @@ from contextvars import ContextVar
 from collections import namedtuple, defaultdict
 from contextlib import contextmanager
 from functools import wraps
+import inspect
 from django.apps import apps
 from django.core import serializers
 from django.core.exceptions import ObjectDoesNotExist
@@ -413,6 +414,8 @@ def _get_objects_field_snapshot(model, using, pks, field_names):
 
 
 _queryset_update = QuerySet.update
+if str(inspect.signature(_queryset_update)) != "(self, **kwargs)":
+    raise RuntimeError("Unsupported Django QuerySet.update signature")
 
 
 def _update_with_revision(self, **kwargs):
@@ -436,6 +439,8 @@ def _update_with_revision(self, **kwargs):
 
 
 _queryset_bulk_update = QuerySet.bulk_update
+if str(inspect.signature(_queryset_bulk_update)) != "(self, objs, fields, batch_size=None)":
+    raise RuntimeError("Unsupported Django QuerySet.bulk_update signature")
 
 
 def _bulk_update_with_revision(self, objs, fields, batch_size=None):
@@ -446,7 +451,12 @@ def _bulk_update_with_revision(self, objs, fields, batch_size=None):
         scoped_queryset = self.filter(pk__in=pks).select_for_update()
         matched_pks = list(scoped_queryset.order_by().values_list("pk", flat=True))
         matched_pks_set = set(matched_pks)
-        filtered_objs = [obj for obj in objs if obj.pk in matched_pks_set]
+        filtered_objs = []
+        seen_pks = set()
+        for obj in objs:
+            if obj.pk in matched_pks_set and obj.pk not in seen_pks:
+                filtered_objs.append(obj)
+                seen_pks.add(obj.pk)
         before_snapshot = _get_objects_field_snapshot(self.model, self.db, matched_pks, fields)
         rows_updated = _queryset_bulk_update(scoped_queryset, filtered_objs, fields, batch_size=batch_size)
         if rows_updated:
